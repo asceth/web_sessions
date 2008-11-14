@@ -1,0 +1,25 @@
+web_sessions provides a server to register 'sessions' belonging
+to an http request.  It should be used in conjunction with
+web_router.  At the beginning of the request it looks to 
+see if the client has a cookie representing a session id.
+
+If so it looks up the session id and find the process responsible
+and then clones it for use in the rest of the request.  At
+the end of the request the clone is then synchronized
+back into the main session process.
+
+If a cookie or session id doesn't exist, then a new session is created
+and before the request is returned to the client a Set-Cookie header
+is placed so the client will continue to use the same session.
+
+Each web_session is setup to allow for arbitrary storage whether
+for storing the user information after authentication code or
+simply storing 'flash' messages.
+
+Persistence of the web_session has not yet been implemented as well
+as a way to expire a session after a certain amount of time.
+
+web_sessions depends upon:
+- web_router
+
+and must be started by another supervisor process.

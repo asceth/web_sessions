@@ -1,0 +1,8 @@
+- Add a mechanism to persist a session to an arbitrary backend
+- Add a way to expire a stale session (should also try and persist
+    the session before expiring it if applicable)
+- Look into a more efficient lookup mechanism other than ets
+    for storing {session_id, pid} pairs
+- Add a way to specify a domain to be used for the cookie and/or
+    a way to override/add cookie options when setting the session
+    id
