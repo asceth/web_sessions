@@ -3,6 +3,5 @@
     the session before expiring it if applicable)
 - Look into a more efficient lookup mechanism other than ets
     for storing {session_id, pid} pairs
-- Add a way to specify a domain to be used for the cookie and/or
-    a way to override/add cookie options when setting the session
+- Add a way to override/add cookie options when setting the session
     id

@@ -10,14 +10,14 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1]).
+-export([start_link/1, start_link/2]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
 %% External API
--export([next/1, rename/2, anonymous/1, register_web_router/1]).
+-export([rename/2, anonymous/1, register_web_router/1]).
 
 %% External Hooks
 -export([pre_request/3, post_request/7]).
@@ -26,10 +26,8 @@
 -include("logger.hrl").
 
 -record(state, {routers=[],
-                next=[],
-                done=[],
-                last=undefined,
-                table}).
+                table,
+                domain}).
 
 -define(SERVER, ?MODULE).
 
@@ -44,17 +42,13 @@ start_link([]) ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [], []);
 start_link(WebRouter) ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter], []).
+start_link(WebRouter, Domain) ->
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain], []).
 
 %%====================================================================
 %% External API
 %%====================================================================
 %%--------------------------------------------------------------------
-%% Function: next(WebSessionsName, Module:atom()) -> Node
-%% Description: Gets the next node the session should be started at
-%%--------------------------------------------------------------------
-next(Mod) ->
-  gen_server:call(?SERVER, {next, Mod}).
-
 register_web_router(WebRouter) ->
   gen_server:call(?SERVER, {register_web_router, WebRouter}).
 
@@ -86,11 +80,15 @@ post_request(Method, Path, Req, Session, Status, Headers, Body) ->
 %%--------------------------------------------------------------------
 init([]) ->
   Table = ets:new(web_sessions, [set, public]),
-  {ok, #state{routers=[], next=[local], done=[], table=Table}};
+  {ok, #state{routers=[], table=Table, domain="."}};
 init([WebRouter]) ->
   Table = ets:new(web_sessions, [set, public]),
   register_web_router_hooks(WebRouter),
-  {ok, #state{routers=[WebRouter], next=[local], done=[], table=Table}}.
+  {ok, #state{routers=[WebRouter], table=Table, domain="."}};
+init([WebRouter, Domain]) ->
+  Table = ets:new(web_sessions, [set, public]),
+  register_web_router_hooks(WebRouter),
+  {ok, #state{routers=[WebRouter], table=Table, domain=Domain}}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
@@ -105,15 +103,15 @@ handle_call({pre_request, Method, Path, Req}, From, #state{table=Table} = State)
   spawn(fun() -> do_pre_request(From, Method, Path, Req, Table) end),
   {noreply, State};
 handle_call({post_request, Method, Path, Req, Session, Status, Headers, Body}, From,
-            #state{table=Table} = State) ->
+            #state{table=Table, domain=Domain} = State) ->
   spawn(fun() -> do_post_request(From, Method, Path, Req, Session, Status,
-                                 Headers, Body, Table) end),
+                                 Headers, Body, Table, Domain) end),
   {noreply, State};
 handle_call({anonymous, SessionId}, From, #state{table=Table} = State) ->
   spawn(fun() -> do_anonymous(From, SessionId, Table) end),
   {noreply, State};
-handle_call({register_web_router, WebRouter, Domain}, _From, #state{routers=Routers} = State) ->
-  State1 = State#state{routers=[{WebRouter, Domain}|Routers]},
+handle_call({register_web_router, WebRouter}, _From, #state{routers=Routers} = State) ->
+  State1 = State#state{routers=[WebRouter|Routers]},
   register_web_router_hooks(WebRouter),
   {reply, ok, State1};
 handle_call(_Request, _From, State) ->
@@ -200,7 +198,7 @@ do_pre_request(From, _Method, _Path, Req, Table) ->
             end,
   gen_server:reply(From, {request, Req, session, Session}).
 
-do_post_request(From, _Method, _Path, _Req, Session, Status, Headers, Body, Table) ->
+do_post_request(From, _Method, _Path, _Req, Session, Status, Headers, Body, Table, Domain) ->
   Sid = Session:session_id(),
   case ets:lookup(Table, Sid) of
     [{_Sid, Pid}|_] ->
@@ -211,7 +209,7 @@ do_post_request(From, _Method, _Path, _Req, Session, Status, Headers, Body, Tabl
       ok
   end,
   QuotedSessionId = mochiweb_util:quote_plus(Sid),
-  Cookie = mochiweb_cookies:cookie("_session_id", QuotedSessionId, [{domain, ".amaterasu.com"}, {path, "/"}]),
+  Cookie = mochiweb_cookies:cookie("_session_id", QuotedSessionId, [{domain, Domain}, {path, "/"}]),
   Headers1 = Headers ++ [Cookie],
   gen_server:reply(From, {status, Status, headers, Headers1, body, Body}).
 
