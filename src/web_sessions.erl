@@ -45,6 +45,7 @@ start_link(WebRouter) ->
 start_link(WebRouter, Domain) ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain], []).
 
+
 %%====================================================================
 %% External API
 %%====================================================================
@@ -81,14 +82,15 @@ post_request(Method, Path, Req, Session, Status, Headers, Body) ->
 init([]) ->
   Table = ets:new(web_sessions, [set, public]),
   {ok, #state{routers=[], table=Table, domain="."}};
-init([WebRouter]) ->
-  Table = ets:new(web_sessions, [set, public]),
-  register_web_router_hooks(WebRouter),
-  {ok, #state{routers=[WebRouter], table=Table, domain="."}};
 init([WebRouter, Domain]) ->
   Table = ets:new(web_sessions, [set, public]),
   register_web_router_hooks(WebRouter),
-  {ok, #state{routers=[WebRouter], table=Table, domain=Domain}}.
+  {ok, #state{routers=[WebRouter], table=Table, domain=Domain}};
+init([WebRouter]) ->
+  Table = ets:new(web_sessions, [set, public]),
+  register_web_router_hooks(WebRouter),
+  {ok, #state{routers=[WebRouter], table=Table, domain="."}}.
+
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
