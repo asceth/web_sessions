@@ -20,7 +20,7 @@
 -export([rename/2, anonymous/1, register_web_router/1]).
 
 %% External Hooks
--export([pre_request/3, post_request/7]).
+-export([pre_request/1, post_request/1]).
 
 %% Logging
 -include("logger.hrl").
@@ -61,11 +61,11 @@ anonymous(SessionId) ->
 rename(OriginalSid, NewSid) ->
   gen_server:cast(?SERVER, {rename, OriginalSid, NewSid}).
 
-pre_request(Method, Path, Req) ->
-  gen_server:call(?SERVER, {pre_request, Method, Path, Req}).
+pre_request(Env) ->
+  gen_server:call(?SERVER, {pre_request, Env}).
 
-post_request(Method, Path, Req, Session, Status, Headers, Body) ->
-  gen_server:call(?SERVER, {post_request, Method, Path, Req, Session, Status, Headers, Body}).
+post_request(Env) ->
+  gen_server:call(?SERVER, {post_request, Env}).
 
 
 %%====================================================================
@@ -101,13 +101,13 @@ init([WebRouter]) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
-handle_call({pre_request, Method, Path, Req}, From, #state{table=Table} = State) ->
-  spawn(fun() -> do_pre_request(From, Method, Path, Req, Table) end),
+handle_call({pre_request, Env}, From, #state{table=Table} = State) ->
+  spawn(fun() -> do_pre_request(From, Env, Table) end),
   {noreply, State};
-handle_call({post_request, Method, Path, Req, Session, Status, Headers, Body}, From,
+
+handle_call({post_request, Env}, From,
             #state{table=Table, domain=Domain} = State) ->
-  spawn(fun() -> do_post_request(From, Method, Path, Req, Session, Status,
-                                 Headers, Body, Table, Domain) end),
+  spawn(fun() -> do_post_request(From, Env, Table, Domain) end),
   {noreply, State};
 handle_call({anonymous, SessionId}, From, #state{table=Table} = State) ->
   spawn(fun() -> do_anonymous(From, SessionId, Table) end),
@@ -179,7 +179,8 @@ do_anonymous(From, SessionId, Table) ->
             end,
   gen_server:reply(From, Session).
 
-do_pre_request(From, _Method, _Path, Req, Table) ->
+do_pre_request(From, Env, Table) ->
+  Req = proplists:get_value("request", Env),
   Session = case Req:get_cookie_value("_session_id") of
               undefined ->
                 {ok, WebSession} = web_session:start_link(),
@@ -198,9 +199,12 @@ do_pre_request(From, _Method, _Path, Req, Table) ->
                     web_session:clone(WebSession)
                 end
             end,
-  gen_server:reply(From, {request, Req, session, Session}).
+  Session1 = Session:flash_add_now("request", Req),
+  Session2 = Session1:flash_add_now("method", proplists:get_value("method", Env)),
+  SessionFinal = Session2:flash_add_now("path_tokens", proplists:get_value("path_tokens", Env)),
+  gen_server:reply(From, SessionFinal).
 
-do_post_request(From, _Method, _Path, _Req, Session, Status, Headers, Body, Table, Domain) ->
+do_post_request(From, Session, Table, Domain) ->
   Sid = Session:session_id(),
   case ets:lookup(Table, Sid) of
     [{_Sid, Pid}|_] ->
@@ -212,8 +216,8 @@ do_post_request(From, _Method, _Path, _Req, Session, Status, Headers, Body, Tabl
   end,
   QuotedSessionId = mochiweb_util:quote_plus(Sid),
   Cookie = mochiweb_cookies:cookie("_session_id", QuotedSessionId, [{domain, Domain}, {path, "/"}]),
-  Headers1 = Headers ++ [Cookie],
-  gen_server:reply(From, {status, Status, headers, Headers1, body, Body}).
+  Session1 = Session:flash_add_now("headers", Session:flash_lookup("headers") ++ [Cookie]),
+  gen_server:reply(From, Session1).
 
 register_session(Table, SessionId, WebSession) ->
   ets:insert(Table, {SessionId, WebSession}).

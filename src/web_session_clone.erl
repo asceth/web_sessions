@@ -14,7 +14,7 @@
 -export([init/1]).
 -export([destroy/0, regenerate/0]).
 -export([data_fetch/1, data_set/2, data_merge/1, data_fun/2]).
--export([flash_add_now/2, flash_add/2, flash_lookup/1]).
+-export([flash_add_now/2, flash_merge_now/1, flash_add/2, flash_lookup/1, flash_lookup_s/1]).
 
 init([]) ->
   ?MODULE:new(web_util:uuid(256), [], [], []);
@@ -64,6 +64,14 @@ flash_add_now(Key, NewValue) ->
   NewFlash = lists:ukeysort(1, [{Key, NewValue}] ++ Flash),
   ?MODULE:new(Sid, Data, NewFlash, Modifiers).
 
+%% @doc Merge a property list to the current session's flash data.
+%%      Flash data added this way is only available to this current request
+%%      and can be looked up with flash_lookup/1.
+%%
+flash_merge_now(PropList) ->
+  NewFlash = lists:ukeysort(1, PropList ++ Flash),
+  ?MODULE:new(Sid, Data, NewFlash, Modifiers).
+
 %% @doc Add a key/value pair to the next session's flash data.
 %%      Flash data added this way is only available on the next request!
 %%
@@ -85,6 +93,14 @@ flash_lookup(Key) ->
       Val;
     false ->
       {error, 404}
+  end.
+
+flash_lookup_s(Key) ->
+  case lists:keysearch(Key, 1, Flash) of
+    {value, {Key, Val}} ->
+      Val;
+    false ->
+      <<"">>
   end.
 
 
