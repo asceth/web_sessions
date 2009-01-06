@@ -199,24 +199,24 @@ do_pre_request(From, Env, Table) ->
                     web_session:clone(WebSession)
                 end
             end,
-  Session1 = Session:flash_add_now("request", Req),
-  Session2 = Session1:flash_add_now("method", proplists:get_value("method", Env)),
-  SessionFinal = Session2:flash_add_now("path_tokens", proplists:get_value("path_tokens", Env)),
+  SessionFinal = web_session:flash_merge_now(Session, [{"request", Req},
+                                                       {"method", proplists:get_value("method", Env)},
+                                                       {"path_tokens", proplists:get_value("path_tokens", Env)}]),
   gen_server:reply(From, SessionFinal).
 
 do_post_request(From, Session, Table, Domain) ->
-  Sid = Session:session_id(),
+  Sid = web_session:sid(Session),
   case ets:lookup(Table, Sid) of
     [{_Sid, Pid}|_] ->
-      ?DEBUG("Syncing Session (~p) with ~p~n~n", [Sid, Session:modifiers()]),
-      web_session:sync(Pid, Session:modifiers());
+      ?DEBUG("Syncing Session (~p) with ~p~n~n", [Sid, web_session:modifiers(Session)]),
+      web_session:sync(Pid, web_session:modifiers(Session));
     [] ->
       ?DEBUG("Could not find Session (~p)~n~n", [Sid]),
       ok
   end,
   QuotedSessionId = mochiweb_util:quote_plus(Sid),
   Cookie = mochiweb_cookies:cookie("_session_id", QuotedSessionId, [{domain, Domain}, {path, "/"}]),
-  Session1 = Session:flash_add_now("headers", Session:flash_lookup("headers") ++ [Cookie]),
+  Session1 = web_session:flash_add_now(Session, "headers", web_session:flash_lookup(Session, "headers") ++ [Cookie]),
   gen_server:reply(From, Session1).
 
 register_session(Table, SessionId, WebSession) ->

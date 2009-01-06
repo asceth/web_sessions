@@ -18,11 +18,24 @@
 
 -export([session_id/1, clone/1, sync/2]).
 
--define(DEFAULT_RECORD, [
-                         {<<"session_id">>, web_util:uuid(256)},
-                         {<<"data">>, []},
-                         {<<"updated_at">>, httpd_util:rfc1123_date()}
-                        ]).
+%% Web Session API
+-export([sid/1]).
+-export([data/1, flash/1, modifiers/1]).
+-export([destroy/1, regenerate/1]).
+-export([data_fetch/2, data_set/3, data_merge/2, data_fun/3]).
+-export([flash_add_now/3, flash_merge_now/2, flash_add/3, flash_lookup/2, flash_lookup_s/2]).
+
+
+-record(session_info, {session_id,
+                  data=[],
+                  flash=[],
+                  modifiers=[],
+                  updated_at}).
+
+-define(DEFAULT_RECORD, #session_info{session_id=web_util:uuid(256),
+                                      data=[],
+                                      updated_at=httpd_util:rfc1123_date()}
+       ).
 
 -record(state, {session}).
 
@@ -51,6 +64,99 @@ clone(WebSessionPid) ->
 sync(WebSessionPid, ModifierList) ->
   gen_server:cast(WebSessionPid, {sync, ModifierList}).
 
+
+%%====================================================================
+%% Web Session API
+%%====================================================================
+destroy(WebSession) ->
+  data_reset(WebSession).
+
+regenerate(WebSession) ->
+  Sid1 = web_util:uuid(256),
+  web_sessions:rename(WebSession#session_info.session_id, Sid1),
+  WebSession#session_info{session_id=Sid1, data=[], flash=[], modifiers=[{regenerate, Sid1}]}.
+
+data_fetch(WebSession, Key) ->
+  case lists:keysearch(Key, 1, WebSession#session_info.data) of
+    {value, {Key, Val}} ->
+      {ok, Val};
+    false ->
+      {error, 404}
+  end.
+
+data_set(WebSession, Key, NewValue) ->
+  data_merge(WebSession, [{Key, NewValue}]).
+
+data_merge(WebSession, TupleList) ->
+  NewData = lists:ukeysort(1, TupleList ++ WebSession#session_info.data),
+  NewModifiers = WebSession#session_info.modifiers ++ [{data_merge, TupleList}],
+  WebSession#session_info{data=NewData, modifiers=NewModifiers}.
+
+data_reset(WebSession) ->
+  NewModifiers = WebSession#session_info.modifiers ++ [{data_reset}],
+  WebSession#session_info{data=[], modifiers=NewModifiers}.
+
+data_fun(WebSession, Fun, Args) ->
+  NewData = Fun(Args, WebSession#session_info.data),
+  NewModifiers = WebSession#session_info.modifiers ++ {data_fun, Fun, Args},
+  WebSession#session_info{data=NewData, modifiers=NewModifiers}.
+
+%% @doc Add a Key/Value pair to the current session's flash data.
+%%      Flash data added this way is only available to this current request
+%%      and can be looked up with flash_lookup/1.
+%%
+flash_add_now(WebSession, Key, NewValue) ->
+  NewFlash = lists:ukeysort(1, [{Key, NewValue}] ++ WebSession#session_info.flash),
+  WebSession#session_info{flash=NewFlash}.
+
+%% @doc Merge a property list to the current session's flash data.
+%%      Flash data added this way is only available to this current request
+%%      and can be looked up with flash_lookup/1.
+%%
+flash_merge_now(WebSession, PropList) ->
+  NewFlash = lists:ukeysort(1, PropList ++ WebSession#session_info.flash),
+  WebSession#session_info{flash=NewFlash}.
+
+%% @doc Add a key/value pair to the next session's flash data.
+%%      Flash data added this way is only available on the next request!
+%%
+flash_add(WebSession, Key, NewValue) ->
+  FlashStore = case lists:keysearch(<<"flash">>, 1, WebSession#session_info.data) of
+    {value, {<<"flash">>, Value}} ->
+      lists:ukeysort(1, [{Key, NewValue}] ++ Value);
+    false ->
+      [{Key, NewValue}]
+  end,
+  data_merge(WebSession, [{<<"flash">>, FlashStore}]).
+
+%% @doc Lookup a key in the flash data that was set in the previous request
+%%      or through a flash_add_now/2 call.
+%%
+flash_lookup(WebSession, Key) ->
+  case lists:keysearch(Key, 1, WebSession#session_info.flash) of
+    {value, {Key, Val}} ->
+      Val;
+    false ->
+      {error, 404}
+  end.
+
+flash_lookup_s(WebSession, Key) ->
+  case lists:keysearch(Key, 1, WebSession#session_info.flash) of
+    {value, {Key, Val}} ->
+      Val;
+    false ->
+      <<"">>
+  end.
+
+sid(WebSession) ->
+  WebSession#session_info.session_id.
+data(WebSession) ->
+  WebSession#session_info.data.
+flash(WebSession) ->
+  WebSession#session_info.flash.
+modifiers(WebSession) ->
+  WebSession#session_info.modifiers.
+
 %%====================================================================
 %% gen_server callbacks
 %%====================================================================
@@ -65,10 +171,12 @@ sync(WebSessionPid, ModifierList) ->
 init([]) ->
   {ok, #state{session=?DEFAULT_RECORD}};
 
+
 %% TODO
 %% Should look for persisted session first
 init([Sid]) ->
-  State = #state{session=record_merge([{<<"session_id">>, Sid}], ?DEFAULT_RECORD)},
+  Session = ?DEFAULT_RECORD,
+  State = #state{session=Session#session_info{session_id=Sid}},
   {ok, State}.
 
 %%--------------------------------------------------------------------
@@ -81,37 +189,16 @@ init([Sid]) ->
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
 handle_call(session_id, _From, #state{session=Session} = State) ->
-  Sid = case lists:keysearch(<<"session_id">>, 1, Session) of
-          {value, {<<"session_id">>, Sid1}} ->
-            Sid1;
-          false ->
-            ""
+  Sid = case Session#session_info.session_id of
+          undefined ->
+            "";
+          Sid1 ->
+            Sid1
         end,
   {reply, Sid, State};
 
 handle_call(clone, _From, #state{session=Session} = State) ->
-  Sid = case lists:keysearch(<<"session_id">>, 1, Session) of
-          {value, {<<"session_id">>, Sid1}} ->
-            Sid1;
-          false ->
-            web_util:uuid(256)
-        end,
-  Data = case lists:keysearch(<<"data">>, 1, Session) of
-           {value, {<<"data">>, Data1}} ->
-             Data1;
-           false ->
-             []
-         end,
-  Flash = case lists:keysearch(<<"flash">>, 1, Data) of
-           {value, {<<"flash">>, Flash1}} ->
-             Flash1;
-           false ->
-             []
-         end,
-  Session1 = record_merge([{<<"session_id">>, Sid}, {<<"data">>, Data}], Session),
-  Clone = web_session_clone:new([], [], [], []),
-  Reply = Clone:init([Sid, Data, Flash, []]),
-  {reply, Reply, State#state{session=Session1}};
+  {reply, Session, State};
 
 handle_call(_Request, _From, State) ->
   Reply = ok,
@@ -159,35 +246,20 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%--------------------------------------------------------------------
 
-record_merge(TupleList, Session) ->
-  lists:ukeysort(1, TupleList ++ Session).
-
-data_merge(TupleList, Session) ->
-  NewData = case lists:keysearch(<<"data">>, 1, Session) of
-    {value, {<<"data">>, Value}} ->
-      lists:ukeysort(1, TupleList ++ Value);
-    false ->
-      TupleList
-  end,
-  record_merge([{<<"data">>, NewData}], Session).
-
-data_reset(Session) ->
-  record_merge([{<<"data">>, []}], Session).
+master_data_merge(TupleList, Session) ->
+  NewData = lists:ukeysort(1, TupleList ++ Session#session_info.data),
+  Session#session_info{data=NewData}.
+master_data_reset(Session) ->
+  Session#session_info{data=[]}.
 
 do_modifier({data_reset}, Session) ->
-  data_reset(Session);
+  master_data_reset(Session);
 do_modifier({data_merge, TupleList}, Session) ->
-  data_merge(TupleList, Session);
+  master_data_merge(TupleList, Session);
 do_modifier({regenerate, Sid}, Session) ->
-  record_merge([{<<"session_id">>, Sid}], Session);
+  Session#session_info{session_id=Sid};
 do_modifier({data_fun, Fun, Args}, Session) ->
-  Data = case lists:keysearch(<<"data">>, 1, Session) of
-           {value, {<<"data">>, Value}} ->
-             Value;
-           false ->
-             []
-         end,
-  NewData = Fun(Args, Data),
-  record_merge(NewData, Session);
+  NewData = Fun(Args, Session#session_info.data),
+  Session#session_info{data=NewData};
 do_modifier(_Other, Session) ->
   Session.
