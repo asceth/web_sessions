@@ -3,7 +3,7 @@
 {application, web_sessions,
   [{description, "Sessions application to be used with web_router"},
    {vsn, "0.1.0"},
-   {modules, [web_session, web_sessions, web_session_clone]},
+   {modules, [web_session, web_sessions]},
    {registered, []},
    {applications, [kernel, stdlib, web_router, inets]}
   ]}.
