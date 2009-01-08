@@ -14,10 +14,11 @@ is placed so the client will continue to use the same session.
 
 Each web_session is setup to allow for arbitrary storage whether
 for storing the user information after authentication code or
-simply storing 'flash' messages.
+simply storing 'flash' messages.  You can also set a timeout option
+in which case the web_session will terminate itself after x milliseconds
+of being idle (by default the timeout is infinity).
 
-Persistence of the web_session has not yet been implemented as well
-as a way to expire a session after a certain amount of time.
+Persistence of the web_session has not yet been implemented.
 
 web_sessions depends upon:
 - web_router
