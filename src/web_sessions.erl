@@ -10,7 +10,7 @@
 -behaviour(gen_server).
 
 %% API
--export([start_link/1, start_link/2]).
+-export([start_link/1, start_link/2, start_link/3]).
 
 %% gen_server callbacks
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
@@ -18,6 +18,7 @@
 
 %% External API
 -export([rename/2, anonymous/1, register_web_router/1]).
+-export([register_session/2, unregister_session/1]).
 
 %% External Hooks
 -export([pre_request/1, post_request/1]).
@@ -26,10 +27,13 @@
 -include("logger.hrl").
 
 -record(state, {routers=[],
+                session_timeout,
                 table,
                 domain}).
 
 -define(SERVER, ?MODULE).
+-define(DEFAULT_SESSION_TIMEOUT, infinity).
+-define(DEFAULT_DOMAIN, ".").
 
 %%====================================================================
 %% API
@@ -39,17 +43,23 @@
 %% Description: Starts the server
 %%--------------------------------------------------------------------
 start_link([]) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [], []);
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [undefined, ?DEFAULT_DOMAIN, ?DEFAULT_SESSION_TIMEOUT], []);
 start_link(WebRouter) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter], []).
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, ?DEFAULT_DOMAIN, ?DEFAULT_SESSION_TIMEOUT], []).
 start_link(WebRouter, Domain) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain], []).
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain, ?DEFAULT_SESSION_TIMEOUT], []).
+start_link(WebRouter, Domain, Timeout) ->
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain, Timeout], []).
 
 
 %%====================================================================
 %% External API
 %%====================================================================
 %%--------------------------------------------------------------------
+register_session(SessionId, WebSession) ->
+  gen_server:cast(?SERVER, {register_session, SessionId, WebSession}).
+unregister_session(SessionId) ->
+  gen_server:cast(?SERVER, {unregister_session, SessionId}).
 register_web_router(WebRouter) ->
   gen_server:call(?SERVER, {register_web_router, WebRouter}).
 
@@ -79,17 +89,13 @@ post_request(Env) ->
 %%                         {stop, Reason}
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
-init([]) ->
+init([undefined, Domain, Timeout]) ->
   Table = ets:new(web_sessions, [set, public]),
-  {ok, #state{routers=[], table=Table, domain="."}};
-init([WebRouter, Domain]) ->
-  Table = ets:new(web_sessions, [set, public]),
-  register_web_router_hooks(WebRouter),
-  {ok, #state{routers=[WebRouter], table=Table, domain=Domain}};
-init([WebRouter]) ->
+  {ok, #state{routers=[], table=Table, domain=Domain, session_timeout=Timeout}};
+init([WebRouter, Domain, Timeout]) ->
   Table = ets:new(web_sessions, [set, public]),
   register_web_router_hooks(WebRouter),
-  {ok, #state{routers=[WebRouter], table=Table, domain="."}}.
+  {ok, #state{routers=[WebRouter], table=Table, domain=Domain, session_timeout=Timeout}}.
 
 
 %%--------------------------------------------------------------------
@@ -101,16 +107,16 @@ init([WebRouter]) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling call messages
 %%--------------------------------------------------------------------
-handle_call({pre_request, Env}, From, #state{table=Table} = State) ->
-  spawn(fun() -> do_pre_request(From, Env, Table) end),
+handle_call({pre_request, Env}, From, #state{table=Table, session_timeout=Timeout} = State) ->
+  spawn(fun() -> do_pre_request(From, Env, Table, Timeout) end),
   {noreply, State};
 
 handle_call({post_request, Env}, From,
             #state{table=Table, domain=Domain} = State) ->
   spawn(fun() -> do_post_request(From, Env, Table, Domain) end),
   {noreply, State};
-handle_call({anonymous, SessionId}, From, #state{table=Table} = State) ->
-  spawn(fun() -> do_anonymous(From, SessionId, Table) end),
+handle_call({anonymous, SessionId}, From, #state{table=Table, session_timeout=Timeout} = State) ->
+  spawn(fun() -> do_anonymous(From, SessionId, Table, Timeout) end),
   {noreply, State};
 handle_call({register_web_router, WebRouter}, _From, #state{routers=Routers} = State) ->
   State1 = State#state{routers=[WebRouter|Routers]},
@@ -126,6 +132,12 @@ handle_call(_Request, _From, State) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling cast messages
 %%--------------------------------------------------------------------
+handle_cast({register_session, SessionId, WebSession}, #state{table=Table} = State) ->
+  spawn(fun() -> internal_register_session(Table, SessionId, WebSession) end),
+  {noreply, State};
+handle_cast({unregister_session, SessionId}, #state{table=Table} = State) ->
+  spawn(fun() -> internal_unregister_session(Table, SessionId) end),
+  {noreply, State};
 handle_cast(_Msg, State) ->
   {noreply, State}.
 
@@ -159,33 +171,35 @@ code_change(_OldVsn, State, _Extra) ->
 %%% Internal functions
 %%--------------------------------------------------------------------
 
-do_anonymous(From, SessionId, Table) ->
+do_anonymous(From, SessionId, Table, Timeout) ->
   Session = case SessionId of
               undefined ->
                 {ok, WebSession} = web_session:start_link(),
+                web_session:set_timeout(WebSession, Timeout),
                 unlink(WebSession),
-                register_session(Table, web_session:session_id(WebSession), WebSession),
+                internal_register_session(Table, web_session:session_id(WebSession), WebSession),
                 web_session:clone(WebSession);
               SessionId ->
                 case ets:lookup(Table, SessionId) of
                   [{_Sid, Pid}|_] ->
                     web_session:clone(Pid);
                   [] ->
-                    {ok, WebSession} = web_session:start_link([SessionId]),
+                    {ok, WebSession} = web_session:start_link([SessionId, [{timeout, Timeout}]]),
                     unlink(WebSession),
-                    register_session(Table, SessionId, WebSession),
+                    internal_register_session(Table, SessionId, WebSession),
                     web_session:clone(WebSession)
                 end
             end,
   gen_server:reply(From, Session).
 
-do_pre_request(From, Env, Table) ->
+do_pre_request(From, Env, Table, Timeout) ->
   Req = proplists:get_value("request", Env),
   Session = case Req:get_cookie_value("_session_id") of
               undefined ->
                 {ok, WebSession} = web_session:start_link(),
+                web_session:set_timeout(WebSession, Timeout),
                 unlink(WebSession),
-                register_session(Table, web_session:session_id(WebSession), WebSession),
+                internal_register_session(Table, web_session:session_id(WebSession), WebSession),
                 web_session:clone(WebSession);
               SessionId ->
                 UnquotedSessionId = mochiweb_util:unquote(SessionId),
@@ -194,8 +208,9 @@ do_pre_request(From, Env, Table) ->
                     web_session:clone(Pid);
                   [] ->
                     {ok, WebSession} = web_session:start_link(),
+                    web_session:set_timeout(WebSession, Timeout),
                     unlink(WebSession),
-                    register_session(Table, web_session:session_id(WebSession), WebSession),
+                    internal_register_session(Table, web_session:session_id(WebSession), WebSession),
                     web_session:clone(WebSession)
                 end
             end,
@@ -219,8 +234,10 @@ do_post_request(From, Session, Table, Domain) ->
   Session1 = web_session:flash_add_now(Session, "headers", web_session:flash_lookup(Session, "headers") ++ [Cookie]),
   gen_server:reply(From, Session1).
 
-register_session(Table, SessionId, WebSession) ->
+internal_register_session(Table, SessionId, WebSession) ->
   ets:insert(Table, {SessionId, WebSession}).
+internal_unregister_session(Table, SessionId) ->
+  ets:delete(Table, SessionId).
 
 register_web_router_hooks(WebRouter) ->
   web_router:add(WebRouter, pre_request, global, web_sessions, pre_request, 1),

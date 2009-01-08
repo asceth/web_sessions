@@ -16,7 +16,7 @@
 -export([init/1, handle_call/3, handle_cast/2, handle_info/2,
          terminate/2, code_change/3]).
 
--export([session_id/1, clone/1, sync/2]).
+-export([session_id/1, clone/1, sync/2, set_timeout/2]).
 
 %% Web Session API
 -export([sid/1]).
@@ -36,8 +36,9 @@
                                       data=[],
                                       updated_at=httpd_util:rfc1123_date()}
        ).
+-define(DEFAULT_TIMEOUT, infinity).
 
--record(state, {session}).
+-record(state, {session, timeout}).
 
 %%====================================================================
 %% API
@@ -49,8 +50,12 @@
 start_link() ->
   gen_server:start_link(?MODULE, [], []).
 
+start_link([Sid, Options]) ->
+  gen_server:start_link(?MODULE, [Sid, Options], []);
 start_link([Sid]) ->
   gen_server:start_link(?MODULE, [Sid], []).
+
+
 
 %%====================================================================
 %% API
@@ -63,6 +68,9 @@ clone(WebSessionPid) ->
 
 sync(WebSessionPid, ModifierList) ->
   gen_server:cast(WebSessionPid, {sync, ModifierList}).
+
+set_timeout(WebSessionPid, Timeout) ->
+  gen_server:cast(WebSessionPid, {set_timeout, Timeout}).
 
 
 %%====================================================================
@@ -169,15 +177,19 @@ modifiers(WebSession) ->
 %% Description: Initiates the server
 %%--------------------------------------------------------------------
 init([]) ->
-  {ok, #state{session=?DEFAULT_RECORD}};
-
+  {ok, #state{session=?DEFAULT_RECORD, timeout=?DEFAULT_TIMEOUT}, ?DEFAULT_TIMEOUT};
 
 %% TODO
 %% Should look for persisted session first
+init([Sid, Options]) ->
+  Timeout = proplists:get_value(timeout, Options, ?DEFAULT_TIMEOUT),
+  Session = ?DEFAULT_RECORD,
+  State = #state{session=Session#session_info{session_id=Sid}, timeout=Timeout},
+  {ok, State, Timeout};
 init([Sid]) ->
   Session = ?DEFAULT_RECORD,
-  State = #state{session=Session#session_info{session_id=Sid}},
-  {ok, State}.
+  State = #state{session=Session#session_info{session_id=Sid}, timeout=?DEFAULT_TIMEOUT},
+  {ok, State, State#state.timeout}.
 
 %%--------------------------------------------------------------------
 %% Function: %% handle_call(Request, From, State) -> {reply, Reply, State} |
@@ -195,14 +207,14 @@ handle_call(session_id, _From, #state{session=Session} = State) ->
           Sid1 ->
             Sid1
         end,
-  {reply, Sid, State};
+  {reply, Sid, State, State#state.timeout};
 
 handle_call(clone, _From, #state{session=Session} = State) ->
-  {reply, Session, State};
+  {reply, Session, State, State#state.timeout};
 
 handle_call(_Request, _From, State) ->
   Reply = ok,
-  {reply, Reply, State}.
+  {reply, Reply, State, State#state.timeout}.
 
 %%--------------------------------------------------------------------
 %% Function: handle_cast(Msg, State) -> {noreply, State} |
@@ -210,11 +222,13 @@ handle_call(_Request, _From, State) ->
 %%                                      {stop, Reason, State}
 %% Description: Handling cast messages
 %%--------------------------------------------------------------------
+handle_cast({set_timeout, Timeout}, State) ->
+  {noreply, State#state{timeout=Timeout}, Timeout};
 handle_cast({sync, ModifierList}, #state{session=Session} = State) ->
   Session1 = lists:foldl(fun do_modifier/2, Session, ModifierList),
-  {noreply, State#state{session=Session1}};
+  {noreply, State#state{session=Session1}, State#state.timeout};
 handle_cast(_Msg, State) ->
-  {noreply, State}.
+  {noreply, State, State#state.timeout}.
 
 %%--------------------------------------------------------------------
 %% Function: handle_info(Info, State) -> {noreply, State} |
@@ -222,8 +236,10 @@ handle_cast(_Msg, State) ->
 %%                                       {stop, Reason, State}
 %% Description: Handling all non call/cast messages
 %%--------------------------------------------------------------------
+handle_info(timeout, State) ->
+  {stop, timeout, State};
 handle_info(_Info, State) ->
-  {noreply, State}.
+  {noreply, State, State#state.timeout}.
 
 %%--------------------------------------------------------------------
 %% Function: terminate(Reason, State) -> void()
@@ -232,7 +248,9 @@ handle_info(_Info, State) ->
 %% cleaning up. When it returns, the gen_server terminates with Reason.
 %% The return value is ignored.
 %%--------------------------------------------------------------------
-terminate(_Reason, _State) ->
+terminate(_Reason, #state{session=Session} = _State) ->
+  SessionId = Session#session_info.session_id,
+  web_sessions:unregister_session(SessionId),
   ok.
 
 %%--------------------------------------------------------------------
