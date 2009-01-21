@@ -214,9 +214,12 @@ do_pre_request(From, Env, Table, Timeout) ->
                     web_session:clone(WebSession)
                 end
             end,
+  PathTokens = proplists:get_value("path_tokens", Env),
+  [FirstPathToken|_Rest] = PathTokens,
   SessionFinal = web_session:flash_merge_now(Session, [{"request", Req},
                                                        {"method", proplists:get_value("method", Env)},
-                                                       {"path_tokens", proplists:get_value("path_tokens", Env)}]),
+                                                       {"path_tokens", proplists:get_value("path_tokens", Env)},
+                                                       {"first_path_token", [FirstPathToken]}]),
   gen_server:reply(From, SessionFinal).
 
 do_post_request(From, Session, Table, Domain) ->
