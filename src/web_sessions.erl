@@ -17,7 +17,7 @@
          terminate/2, code_change/3]).
 
 %% External API
--export([rename/2, anonymous/1, register_web_router/1]).
+-export([rename/2, anonymous/1, register_web_router_exchange/1]).
 -export([register_session/2, unregister_session/1]).
 
 %% External Hooks
@@ -26,7 +26,7 @@
 %% Logging
 -include("logger.hrl").
 
--record(state, {routers=[],
+-record(state, {exchanges=[],
                 session_timeout,
                 table,
                 domain}).
@@ -44,12 +44,12 @@
 %%--------------------------------------------------------------------
 start_link([]) ->
   gen_server:start_link({local, ?SERVER}, ?MODULE, [undefined, ?DEFAULT_DOMAIN, ?DEFAULT_SESSION_TIMEOUT], []);
-start_link(WebRouter) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, ?DEFAULT_DOMAIN, ?DEFAULT_SESSION_TIMEOUT], []).
-start_link(WebRouter, Domain) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain, ?DEFAULT_SESSION_TIMEOUT], []).
-start_link(WebRouter, Domain, Timeout) ->
-  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebRouter, Domain, Timeout], []).
+start_link(WebExchange) ->
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebExchange, ?DEFAULT_DOMAIN, ?DEFAULT_SESSION_TIMEOUT], []).
+start_link(WebExchange, Domain) ->
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebExchange, Domain, ?DEFAULT_SESSION_TIMEOUT], []).
+start_link(WebExchange, Domain, Timeout) ->
+  gen_server:start_link({local, ?SERVER}, ?MODULE, [WebExchange, Domain, Timeout], []).
 
 
 %%====================================================================
@@ -60,8 +60,8 @@ register_session(SessionId, WebSession) ->
   gen_server:cast(?SERVER, {register_session, SessionId, WebSession}).
 unregister_session(SessionId) ->
   gen_server:cast(?SERVER, {unregister_session, SessionId}).
-register_web_router(WebRouter) ->
-  gen_server:call(?SERVER, {register_web_router, WebRouter}).
+register_web_router_exchange(WebExchange) ->
+  gen_server:call(?SERVER, {register_web_router, WebExchange}).
 
 %% Function: anonymous() -> SessionId
 %% Description: Creates a session and returns a session clone - useful for testing
@@ -91,11 +91,11 @@ post_request(Env) ->
 %%--------------------------------------------------------------------
 init([undefined, Domain, Timeout]) ->
   Table = ets:new(web_sessions, [set, public]),
-  {ok, #state{routers=[], table=Table, domain=Domain, session_timeout=Timeout}};
-init([WebRouter, Domain, Timeout]) ->
+  {ok, #state{exchanges=[], table=Table, domain=Domain, session_timeout=Timeout}};
+init([WebExchange, Domain, Timeout]) ->
   Table = ets:new(web_sessions, [set, public]),
-  register_web_router_hooks(WebRouter),
-  {ok, #state{routers=[WebRouter], table=Table, domain=Domain, session_timeout=Timeout}}.
+  register_web_router_hooks(WebExchange),
+  {ok, #state{exchanges=[WebExchange], table=Table, domain=Domain, session_timeout=Timeout}}.
 
 
 %%--------------------------------------------------------------------
@@ -118,9 +118,9 @@ handle_call({post_request, Env}, From,
 handle_call({anonymous, SessionId}, From, #state{table=Table, session_timeout=Timeout} = State) ->
   spawn(fun() -> do_anonymous(From, SessionId, Table, Timeout) end),
   {noreply, State};
-handle_call({register_web_router, WebRouter}, _From, #state{routers=Routers} = State) ->
-  State1 = State#state{routers=[WebRouter|Routers]},
-  register_web_router_hooks(WebRouter),
+handle_call({register_web_router, WebExchange}, _From, #state{exchanges=Exchanges} = State) ->
+  State1 = State#state{exchanges=[WebExchange|Exchanges]},
+  register_web_router_hooks(WebExchange),
   {reply, ok, State1};
 handle_call(_Request, _From, State) ->
   Reply = ok,
@@ -242,7 +242,7 @@ internal_register_session(Table, SessionId, WebSession) ->
 internal_unregister_session(Table, SessionId) ->
   ets:delete(Table, SessionId).
 
-register_web_router_hooks(WebRouter) ->
-  web_router:add(WebRouter, pre_request, global, web_sessions, pre_request, 1),
-  web_router:add(WebRouter, post_request, global, web_sessions, post_request, 1).
+register_web_router_hooks(WebExchange) ->
+  web_router_exchange:add_binding(WebExchange, fun web_sessions:pre_request/1, <<"*.pre_request.global">>),
+  web_router_exchange:add_binding(WebExchange, fun web_sessions:post_request/1, <<"*.post_request.global">>).
 
